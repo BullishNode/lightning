@@ -701,6 +701,56 @@ def test_xpay_slow_mode(node_factory, bitcoind):
                                 'successful_parts': 2}
 
 
+@pytest.mark.xfail(strict=True)
+def test_xpay_slow_mode_route_error(node_factory, bitcoind, executor):
+    # l1 -> l2 -> l3 -> l5
+    #         \-> l4 -/^
+    # l4 never relays l5's failure, so that part stays pending until l2
+    # times the HTLC out onchain.
+    l1, l2, l3, l4, l5 = node_factory.get_nodes(5, opts=[{'xpay-slow-mode': True},
+                                                         {}, {},
+                                                         {'disconnect': ['-WIRE_UPDATE_FAIL_HTLC', 'permfail']},
+                                                         {}])
+    node_factory.join_nodes([l2, l3, l5])
+    node_factory.join_nodes([l2, l4, l5])
+    node_factory.join_nodes([l1, l2])
+    bitcoind.generate_block(5)
+    wait_for(lambda: len(l1.rpc.listchannels()['channels']) == 10)
+
+    inv = l5.rpc.invoice(800000000, 'test_xpay_slow_mode_route_error', 'test_xpay_slow_mode_route_error', preimage='01' * 32)
+    l5.rpc.delinvoice('test_xpay_slow_mode_route_error', status='unpaid')
+
+    fut = executor.submit(l1.rpc.xpay, inv['bolt11'], retry_for=0)
+
+    # The part via l3 fails at once.  Re-routing its amount fails too (the
+    # part via l4 still holds the capacity), but slow mode must wait for
+    # that part before failing the command.
+    def statuses():
+        return sorted(p['status'] for p in l1.rpc.listsendpays(payment_hash=inv['payment_hash'])['payments'])
+
+    wait_for(lambda: statuses() == ['failed', 'pending'])
+    assert not fut.done()
+
+    # l4 goes onchain; l2 times out the HTLC and fails it back to l1.
+    l4.wait_for_channel_onchain(l2.info['id'])
+    bitcoind.generate_block(1, wait_for_mempool=1)
+    l2.daemon.wait_for_log(' to ONCHAIN')
+    _, txid, blocks = l2.wait_for_onchaind_tx('OUR_HTLC_TIMEOUT_TO_US',
+                                              'THEIR_UNILATERAL/OUR_HTLC')
+    bitcoind.generate_block(blocks)
+    l2.mine_txid_or_rbf(txid)
+    bitcoind.generate_block(2)
+    wait_for(lambda: statuses() == ['failed', 'failed'])
+
+    # Now every part has failed, so the command must fail.
+    with pytest.raises(RpcError) as err:
+        fut.result(TIMEOUT)
+    assert err.value.error['code'] == 209
+    assert only_one(l1.rpc.listpays(payment_hash=inv['payment_hash'])['pays'])['status'] == 'failed'
+    # And the payment's private layer is gone.
+    wait_for(lambda: not [layer for layer in l1.rpc.askrene_listlayers()['layers'] if layer['layer'].startswith('xpay-')])
+
+
 @pytest.mark.parametrize("slow_mode", [False, True])
 def test_fail_after_success(node_factory, bitcoind, executor, slow_mode):
     # l1 -> l2 -> l3 -> l5
