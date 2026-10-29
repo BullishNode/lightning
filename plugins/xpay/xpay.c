@@ -1758,6 +1758,7 @@ static struct command_result *getroutes_done_err(struct command *aux_cmd,
 	else
 		complaint = tal_fmt(tmpctx, "Then routing for remaining %s failed",
 				    fmt_amount_msat(tmpctx, payment->amount_being_routed));
+	payment->amount_being_routed = AMOUNT_MSAT(0);
 	payment_give_up(aux_cmd, payment, PAY_UNSPECIFIED_ERROR,
 			"Failed after %"PRIu64" attempts. %s%s: %s",
 			payment->total_num_attempts,

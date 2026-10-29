@@ -701,7 +701,6 @@ def test_xpay_slow_mode(node_factory, bitcoind):
                                 'successful_parts': 2}
 
 
-@pytest.mark.xfail(strict=True)
 def test_xpay_slow_mode_route_error(node_factory, bitcoind, executor):
     # l1 -> l2 -> l3 -> l5
     #         \-> l4 -/^
